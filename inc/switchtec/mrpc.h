@@ -61,6 +61,7 @@ enum mrpc_cmd {
 	MRPC_SES = 30,
 	MRPC_RD_FLASH = 31,
 	MRPC_ECHO = 65,
+	MRPC_GAS_READ = 0x29,
 };
 
 enum mrpc_bg_status {
