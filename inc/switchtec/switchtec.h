@@ -43,6 +43,11 @@
 extern "C" {
 #endif
 
+#define FWDL_METADATA_ENDOR_ID_LEN 4
+#define FWDL_METADATA_DATE_STR_LEN 8
+#define FWDL_METADATA_TIME_STR_LEN 8
+#define FWDL_METADATA_IMG_STR_LEN 16
+#define FWDL_METADATA_RESERVED_LEN 178
 struct switchtec_dev;
 
 #define SWITCHTEC_MAX_PARTS  48
@@ -153,6 +158,8 @@ enum switchtec_fw_image_type {
 	SWITCHTEC_FW_TYPE_DAT1 = 0x5,
 	SWITCHTEC_FW_TYPE_NVLOG = 0x6,
 	SWITCHTEC_FW_TYPE_IMG1 = 0x7,
+	SWITCHTEC_FW_TYPE_BL20 = 0x8,
+	SWITCHTEC_FW_TYPE_BL21 = 0x9,
 	SWITCHTEC_FW_TYPE_SEEPROM = 0xFE,
 };
 
@@ -173,6 +180,7 @@ struct switchtec_fw_image_info {
 	 * @see switchtec_fw_running()
 	 */
 	int active;
+	int running;
 };
 
 /**
@@ -406,6 +414,51 @@ enum switchtec_fw_active_flags {
 };
 
 /**
+*@brief
+* Structure of firmware image(.pmc) file header.
+* All bytes are in little endian.
+*/
+typedef struct fwdl_file_hdr_struct
+{
+	unsigned char vendor_id[4];         /**< Vendor ID, e.g. "MSCC" */
+	unsigned char img_length[4];        /**< image length = firmware code len + sign_len */
+	unsigned char part_type[4];         /**< Partition type, refers to flayout_part_type_enum */
+	unsigned char load_addr[4];         /**< Firmware load address (unused) */
+	unsigned char version[4];           /**< Firmware version */
+	unsigned char sequence[4];          /**< Sequence number (unused) */
+	unsigned char auth_en[4];           /**< Indicates the download file(.pmc) has signature data or not */
+	unsigned char sign_len[4];          /**< The length of the signature data */
+	unsigned char xml_version[4];       /**< Xml version supported */
+	unsigned char date_str[8];          /**< Format: YYYYMMDD, eg, 20171106 */
+	unsigned char time_str[8];          /**< Format: HH:MM:SS, 16:55:10 */
+	unsigned char img_str[16];          /**< Descriptions string for current image, eg, MAIN FW */
+	unsigned char bl_baud_rate;         /**< Bootloader baud rate, refer to uart_baud_enum */
+	unsigned char stdio_uart_port;      /**< UART port used in bootloader and main fw before reading cfg file */
+	unsigned char reserved[178];        /**< unused */
+	unsigned char hdr_crc[4];           /**< header CRC value for 256B header */
+	unsigned char img_crc[4];           /**< image CRC value for valid fimrware code/data without signature data */
+}__attribute__((packed)) fwdl_file_hdr_struct;
+struct fwdl_meta
+{
+	unsigned char vendor_id[FWDL_METADATA_ENDOR_ID_LEN];       /**< Vendor ID, e.g. "MSCC" */
+	unsigned int img_length;                                  /**< Whole image length = firmware valid data len + sign_len(if auth_en is 1) */
+	unsigned int part_type;                                   /**< Partition type, refers to flayout_part_type_enum */
+	unsigned int load_addr;                                   /**< Firmware load address (unused) */
+	unsigned int version;                                     /**< Firmware version */
+	unsigned int sequence;                                    /**< Sequence number (unused) */
+	unsigned int auth_en;                                     /**< Indicates image is appended signature data at the end of file or not */
+	unsigned int sign_len;                                    /**< Image signature length */
+	unsigned int xml_version;                                 /**< Xml version supported */
+	unsigned char date_str[FWDL_METADATA_DATE_STR_LEN];        /**< Format: YYYYMMDD, eg, 20171106 */
+	unsigned char time_str[FWDL_METADATA_TIME_STR_LEN];        /**< Format: HH:MM:SS, 16:55:10 */
+	unsigned char img_str[FWDL_METADATA_IMG_STR_LEN];          /**< Descriptions string for current image, eg, MAIN FW */
+	unsigned char bl_baud_rate;                                /**< Bootloader baud rate, refer to uart_baud_enum */
+	unsigned char stdio_uart_port;                             /**< UART port used in bootloader and main fw before reading cfg file */
+	unsigned char reserved[FWDL_METADATA_RESERVED_LEN];        /**< unused */
+	unsigned int hdr_crc;                                     /**< Metadata/header crc */
+	unsigned int img_crc;                                     /**<  Image data crc, just frimware valid data, excluding siganature data */
+};
+/**
  * @brief Get whether a firmware partition is active.
  *
  * An active partition implies that it will be used the next
@@ -428,20 +481,6 @@ static inline int switchtec_fw_running(struct switchtec_fw_image_info *inf)
 }
 
 
-/**
- * @brief Raw firmware image header/footer
- *
- * Avoid using this directly
- */
-struct switchtec_fw_footer {
-	char magic[4];
-	uint32_t image_len;
-	uint32_t load_addr;
-	uint32_t version;
-	uint32_t rsvd;
-	uint32_t header_crc;
-	uint32_t image_crc;
-};
 
 int switchtec_fw_dlstatus(struct switchtec_dev *dev,
 			  enum switchtec_fw_dlstatus *status,
@@ -461,14 +500,6 @@ int switchtec_fw_read_fd(struct switchtec_dev *dev, int fd,
 			 void (*progress_callback)(int cur, int tot));
 int switchtec_fw_read(struct switchtec_dev *dev, unsigned long addr,
 		      size_t len, void *buf);
-int switchtec_fw_read_footer(struct switchtec_dev *dev,
-			     unsigned long partition_start,
-			     size_t partition_len,
-			     struct switchtec_fw_footer *ftr,
-			     char *version, size_t version_len);
-int switchtec_fw_read_active_map_footer(struct switchtec_dev *dev,
-					struct switchtec_fw_footer *ftr,
-					char *version, size_t version_len);
 void switchtec_fw_perror(const char *s, int ret);
 int switchtec_fw_file_info(int fd, struct switchtec_fw_image_info *info);
 const char *switchtec_fw_image_type(const struct switchtec_fw_image_info *info);
@@ -482,7 +513,15 @@ int switchtec_fw_cfg_info(struct switchtec_dev *dev,
 			  struct switchtec_fw_image_info *inact_cfg,
 			  struct switchtec_fw_image_info *mult_cfg,
 			  int *nr_mult);
-int switchtec_fw_img_write_hdr(int fd, struct switchtec_fw_footer *ftr,
+int switchtec_bl2_img_info(struct switchtec_dev *dev,
+			   struct switchtec_fw_image_info *act_img,
+			   struct switchtec_fw_image_info *inact_img);
+int switchtec_fw_read_meta(struct switchtec_dev *dev,
+			   unsigned long partition_start,
+			   size_t partition_len,
+			   struct fwdl_meta *ftr,
+			   char *version, size_t version_len);
+int switchtec_fw_img_write_hdr(int fd, struct fwdl_meta *ftr,
 			       enum switchtec_fw_image_type type);
 int switchtec_fw_is_boot_ro(struct switchtec_dev *dev);
 int switchtec_fw_set_boot_ro(struct switchtec_dev *dev,
