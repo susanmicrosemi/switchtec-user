@@ -373,17 +373,32 @@ void switchtec_fw_perror(const char *s, int ret)
 	fprintf(stderr, "%s: %s\n", s, msg);
 }
 
-struct fw_image_header {
-	char magic[4];
-	uint32_t image_len;
-	uint32_t type;
-	uint32_t load_addr;
-	uint32_t version;
-	uint32_t rsvd[9];
-	uint32_t header_crc;
-	uint32_t image_crc;
-};
 
+/**
+ * @brief convert u8 data array to u32 data
+ * @param[in] p	pointer to u8 data array
+ * @param[in] size	u8 data number
+ * @return u32 data
+ *            -1: size is not 4;
+ */
+unsigned long switch_convertu8tou32(unsigned char *p, int size)
+{
+	unsigned long tmp, data;
+	int i;
+
+	tmp = 0;
+	data = 0;
+
+	if (size > 4)
+		return -1;
+
+	for (i = 0; i < size; i++) {
+		tmp = p[i];
+		data |= (tmp << (i * 8));
+	}
+
+	return data;
+}
 /**
  * @brief Retrieve information about a firmware image file
  * @param[in]  fd	File descriptor for the image file to inspect
@@ -393,25 +408,36 @@ struct fw_image_header {
 int switchtec_fw_file_info(int fd, struct switchtec_fw_image_info *info)
 {
 	int ret;
-	struct fw_image_header hdr = {};
-
-	ret = read(fd, &hdr, sizeof(hdr));
-	lseek(fd, 0, SEEK_SET);
-
-	if (ret != sizeof(hdr))
-		goto invalid_file;
-
-	if (strcmp(hdr.magic, "PMC") != 0)
-		goto invalid_file;
+	struct fw_image_header hdr;
+	unsigned char vend[5] = {"MSCC"};
+	unsigned char count;
+	unsigned char ver_num;
+	int i;
 
 	if (info == NULL)
 		return 0;
 
-	info->type = hdr.type;
-	info->crc = le32toh(hdr.image_crc);
-	version_to_string(hdr.version, info->version, sizeof(info->version));
-	info->image_addr = le32toh(hdr.load_addr);
-	info->image_len = le32toh(hdr.image_len);
+	lseek(fd, 0, SEEK_SET);
+	ret = read(fd, &hdr, sizeof(hdr));
+
+	if (ret != sizeof(hdr))
+		goto invalid_file;
+
+	count = 0;
+	for (i = 0; i < 4; i++) {
+		if(hdr.vendor_id[i] == vend[i])
+			count ++;
+	}
+
+	if (count == 4) {
+		info->type = (enum switchtec_fw_image_type)switch_convertu8tou32(hdr.part_type, 4);
+		info->crc = switch_convertu8tou32(hdr.img_crc, 4);
+		ver_num = switch_convertu8tou32(hdr.version, 4);
+		version_to_string(ver_num, info->version, sizeof(info->version));
+		info->image_addr = (size_t)switch_convertu8tou32(hdr.load_addr, 4);
+		info->image_len = (size_t)switch_convertu8tou32(hdr.img_length, 4);
+	} else
+		goto invalid_file;
 
 	return 0;
 
@@ -462,7 +488,7 @@ int switchtec_fw_part_info(struct switchtec_dev *dev, int nr_info,
 {
 	int ret;
 	int i;
-	struct switchtec_fw_footer ftr;
+	struct switchtec_fwdl_meta ftr;
 
 	if (info == NULL || nr_info == 0)
 		return -EINVAL;
@@ -474,23 +500,24 @@ int switchtec_fw_part_info(struct switchtec_dev *dev, int nr_info,
 		if (ret)
 			return ret;
 
-
 		if (info[i].type == SWITCHTEC_FW_TYPE_NVLOG) {
 			inf->version[0] = 0;
 			inf->crc = 0;
 			continue;
 		}
 
-		ret = switchtec_fw_read_footer(dev, inf->image_addr,
-					       inf->image_len, &ftr,
-					       inf->version,
-					       sizeof(inf->version));
+		if (ret)
+			return ret;
+
+		ret = switchtec_fw_read_metadata(dev, inf->image_addr,
+						 inf->image_len, &ftr,
+						 inf->version,
+						 sizeof(inf->version));
 		if (ret < 0) {
 			inf->version[0] = 0;
 			inf->crc = 0xFFFFFFFF;
-		} else {
-			inf->crc = ftr.image_crc;
-		}
+		} else
+			inf->crc = ftr.img_crc;
 	}
 
 	return nr_info;
@@ -639,6 +666,79 @@ int switchtec_fw_img_info(struct switchtec_dev *dev,
 
 	return 0;
 }
+/**
+ * @brief Read a Switchtec device's bl2 data
+ * @param[in]  dev	Switchtec device handle
+ * @param[out] act_img	Info structure for the active partition
+ * @param[out] inact_img	Info structure for the inactive partition
+ * @return 0 on success, error code on failure
+ */
+
+int switchtec_fw_bl2_info(struct switchtec_dev *dev,
+			   struct switchtec_fw_image_info *act_img,
+			   struct switchtec_fw_image_info *inact_img)
+{
+	int ret;
+	struct switchtec_fw_image_info info[2];
+
+	info[0].type = SWITCHTEC_FW_TYPE_BL20;
+	info[1].type = SWITCHTEC_FW_TYPE_BL21;
+
+	ret = switchtec_fw_part_info(dev, sizeof(info) / sizeof(*info), info);
+
+	if (ret < 0)
+		return ret;
+
+	if (switchtec_fw_active(&info[0])) {
+		if (act_img)
+			memcpy(act_img, &info[0], sizeof(*act_img));
+		if (inact_img)
+			memcpy(inact_img, &info[1], sizeof(*inact_img));
+	} else {
+		if (act_img)
+			memcpy(act_img, &info[1], sizeof(*act_img));
+		if (inact_img)
+			memcpy(inact_img, &info[0], sizeof(*inact_img));
+	}
+
+	return 0;
+}
+
+/**
+ * @brief Read a Switchtec device's flash data into a file
+ *  A Meta data is designed to save information at the header of .pmc
+ *  and at the end of a flash partition.
+ * @param[in] dev	Switchtec device handle
+ * @param[in] fd	File descriptor of the file to save the firmware
+ *	data to
+ * @param[in] partition_start	partition start address to read from
+ * @param[in] partition_len	partition length to read
+ * @param[out] ftr	switchtec_fwdl_meta information
+ * @return 0 on success, error code on failure
+ */
+int switchtec_fw_read_metadata(struct switchtec_dev *dev,
+			   unsigned long partition_start,
+			   size_t partition_len,
+			   struct switchtec_fwdl_meta *ftr,
+			   char *version, size_t version_len)
+{
+	int ret;
+	unsigned long addr = partition_start + partition_len -
+			     sizeof(struct switchtec_fwdl_meta);
+
+	if (!ftr)
+		return -EINVAL;
+
+	ret = switchtec_fw_read(dev, addr, sizeof(struct switchtec_fwdl_meta), ftr);
+	if (ret < 0)
+		return ret;
+
+	if (version)
+		version_to_string(ftr->version, version, version_len);
+
+	return 0;
+}
+
 
 /**
  * @brief Read a Switchtec device's flash data
@@ -733,57 +833,17 @@ int switchtec_fw_read_fd(struct switchtec_dev *dev, int fd,
 }
 
 /**
- * @brief Read a Switchtec device's firmware partition footer
- * @param[in]  dev		Switchtec device handle
- * @param[in]  partition_start	Partition start address
- * @param[in]  partition_len	Partition length
- * @param[out] ftr		The footer structure to populate
- * @param[out] version		Optional pointer to a string which will
- *	be populated with a human readable string of the version
- * @param[in]  version_len	Maximum length of the version string
- * @return 0 on success, error code on failure
- */
-int switchtec_fw_read_footer(struct switchtec_dev *dev,
-			     unsigned long partition_start,
-			     size_t partition_len,
-			     struct switchtec_fw_footer *ftr,
-			     char *version, size_t version_len)
-{
-	int ret;
-	unsigned long addr = partition_start + partition_len -
-		sizeof(struct switchtec_fw_footer);
-
-	if (!ftr)
-		return -EINVAL;
-
-	ret = switchtec_fw_read(dev, addr, sizeof(struct switchtec_fw_footer),
-				ftr);
-	if (ret < 0)
-		return ret;
-
-	if (strcmp(ftr->magic, "PMC") != 0) {
-		errno = ENOEXEC;
-		return -errno;
-	}
-
-	if (version)
-		version_to_string(ftr->version, version, version_len);
-
-	return 0;
-}
-
-/**
- * @brief Read Switchtec device's active map partition footer
- * @param[in]  dev		Switchtec device handle
- * @param[out] ftr		The footer structure to populate
- * @param[out] version		Optional pointer to a string which will
- *	be populated with a human readable string of the version
- * @param[in]  version_len	Maximum length of the version string
- * @return 0 on success, error code on failure
- */
-int switchtec_fw_read_active_map_footer(struct switchtec_dev *dev,
-					struct switchtec_fw_footer *ftr,
-					char *version, size_t version_len)
+* @brief Read Switchtec device's active map partition metadata
+* @param[in]  dev	  Switchtec device handle
+* @param[out] ftr	  The footer structure to populate
+* @param[out] version	  Optional pointer to a string which will
+*  be populated with a human readable string of the version
+* @param[in]  version_len  Maximum length of the version string
+* @return 0 on success, error code on failure
+*/
+int switchtec_fw_read_active_map_metadata(struct switchtec_dev *dev,
+					  struct switchtec_fw_meta *ftr,
+					  char *version, size_t version_len)
 {
 	int ret;
 	uint32_t map0_update_index;
@@ -803,31 +863,32 @@ int switchtec_fw_read_active_map_footer(struct switchtec_dev *dev,
 	if (map0_update_index < map1_update_index)
 		active_map_part_start = SWITCHTEC_FLASH_MAP1_PART_START;
 
-
-	return switchtec_fw_read_footer(dev, active_map_part_start,
-					SWITCHTEC_FLASH_PART_LEN, ftr, version,
-					version_len);
+	return switchtec_fw_read_meta(dev, active_map_part_start,
+				      SWITCHTEC_FLASH_PART_LEN, ftr, version,
+				      version_len);
 }
 
 /**
  * @brief Write the header for a Switchtec firmware image file
  * @param[in]  fd	File descriptor for image file to write
- * @param[in]  ftr	Footer information to include in the header
+ * @param[in]  ftr	switchtec_fwdl_meta information to include in the header
  * @param[in]  type	File type to record in the header
  * @return 0 on success, error code on failure
  */
-int switchtec_fw_img_write_hdr(int fd, struct switchtec_fw_footer *ftr,
+int switchtec_fw_img_write_hdr(int fd, struct switchtec_fwdl_meta *ftr,
 			       enum switchtec_fw_image_type type)
 {
+	enum switchtec_fw_image_type imgtype;
 	struct fw_image_header hdr = {};
 
-	memcpy(hdr.magic, ftr->magic, sizeof(hdr.magic));
-	hdr.image_len = ftr->image_len;
-	hdr.type = type;
-	hdr.load_addr = ftr->load_addr;
-	hdr.version = ftr->version;
-	hdr.header_crc = ftr->header_crc;
-	hdr.image_crc = ftr->image_crc;
+	imgtype = type;
+	memcpy(hdr.vendor_id, ftr->vendor_id, sizeof(hdr.vendor_id));
+	memcpy(hdr.img_length, &(ftr->img_length), sizeof(hdr.img_length));
+	memcpy(hdr.part_type, &imgtype, sizeof(hdr.part_type));
+	memcpy(hdr.load_addr, &(ftr->load_addr), sizeof(hdr.load_addr));
+	memcpy(hdr.version, &(ftr->version), sizeof(hdr.version));
+	memcpy(hdr.hdr_crc, &(ftr->hdr_crc), sizeof(hdr.hdr_crc));
+	memcpy(hdr.img_crc, &(ftr->img_crc), sizeof(hdr.img_crc));
 
 	return write(fd, &hdr, sizeof(hdr));
 }
