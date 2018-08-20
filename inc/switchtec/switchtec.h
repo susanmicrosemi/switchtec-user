@@ -501,7 +501,7 @@ int switchtec_fw_read_fd(struct switchtec_dev *dev, int fd,
 int switchtec_fw_read(struct switchtec_dev *dev, unsigned long addr,
 		      size_t len, void *buf);
 int switchtec_fw_read_active_map_metadata(struct switchtec_dev *dev,
-					  struct switchtec_fw_meta *ftr,
+					  struct switchtec_fwdl_meta *ftr,
 					  char *version, size_t version_len);
 void switchtec_fw_perror(const char *s, int ret);
 int switchtec_fw_file_info(int fd, struct switchtec_fw_image_info *info);

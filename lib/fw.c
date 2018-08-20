@@ -842,7 +842,7 @@ int switchtec_fw_read_fd(struct switchtec_dev *dev, int fd,
 * @return 0 on success, error code on failure
 */
 int switchtec_fw_read_active_map_metadata(struct switchtec_dev *dev,
-					  struct switchtec_fw_meta *ftr,
+					  struct switchtec_fwdl_meta *ftr,
 					  char *version, size_t version_len)
 {
 	int ret;
@@ -863,7 +863,7 @@ int switchtec_fw_read_active_map_metadata(struct switchtec_dev *dev,
 	if (map0_update_index < map1_update_index)
 		active_map_part_start = SWITCHTEC_FLASH_MAP1_PART_START;
 
-	return switchtec_fw_read_meta(dev, active_map_part_start,
+	return switchtec_fw_read_metadata(dev, active_map_part_start,
 				      SWITCHTEC_FLASH_PART_LEN, ftr, version,
 				      version_len);
 }
