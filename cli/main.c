@@ -1143,48 +1143,57 @@ static int print_fw_part_info(struct switchtec_dev *dev)
 	int nr_mult = 16;
 	struct switchtec_fw_image_info act_img, inact_img, act_cfg, inact_cfg,
 		mult_cfg[nr_mult];
-	struct switchtec_fw_footer map;
-	struct switchtec_fw_footer bootloader;
-	char map_ver[16];
-	char bootloader_ver[16];
+	struct switchtec_fw_image_info bl2_act_img, bl2_inact_img;
+	struct switchtec_fw_meta bootloader, map;
+	char bootloader_ver[16], map_ver[16];
 	int bootloader_ro;
+	unsigned long partition_start;
+	size_t partition_length;
 	int ret, i;
 
 	ret = switchtec_fw_img_info(dev, &act_img, &inact_img);
 	if (ret < 0)
 		return ret;
 
-	ret = switchtec_fw_cfg_info(dev, &act_cfg, &inact_cfg, mult_cfg,
-				    &nr_mult);
-
+	ret = switchtec_fw_cfg_info(dev, &act_cfg, &inact_cfg,
+				    mult_cfg, &nr_mult);
 	if (ret < 0)
 		return ret;
 
-	ret = switchtec_fw_read_footer(dev, SWITCHTEC_FLASH_BOOT_PART_START,
-				       SWITCHTEC_FLASH_PART_LEN, &bootloader,
-				       bootloader_ver, sizeof(bootloader_ver));
+	ret = switchtec_fw_bl2_info(dev, &bl2_act_img, &bl2_inact_img);
+	if (ret < 0)
+		return ret;
+
+	partition_start = SWITCHTEC_FLASH_BOOT_PART_START;
+	partition_length = SWITCHTEC_FLASH_PART_LEN;
+	ret = switchtec_fw_read_metadata(dev, partition_start, partition_length,
+				         &bootloader, bootloader_ver,
+				         sizeof(bootloader_ver));
 	if (ret < 0) {
 		switchtec_perror("BOOT");
 		return ret;
 	}
 
-	ret = switchtec_fw_read_active_map_footer(dev, &map, map_ver,
-						  sizeof(map_ver));
-	if (ret < 0) {
-		switchtec_perror("MAP");
-		return ret;
-	}
+        ret = switchtec_fw_read_active_map_metadata(dev, &map, map_ver,
+						    sizeof(map_ver));
+        if (ret < 0) {
+                switchtec_perror("MAP");
+                return ret;
+        }
 
 	bootloader_ro = switchtec_fw_is_boot_ro(dev);
 	if (bootloader_ro != SWITCHTEC_FW_RO)
 		bootloader_ro = 0;
 
 	printf("Active Partition:\n");
-	printf("  BOOT \tVersion: %-8s\tCRC: %08lx   %s\n",
-	       bootloader_ver, (long)bootloader.image_crc,
+	printf("  BOOT  \tVersion: %-8s\tCRC: %08lx   %s\n",
+	       bootloader_ver, (long)bootloader.img_crc,
 	       bootloader_ro ? "(RO)" : "");
+	printf("  BL2  \tVersion: %-8s\tCRC: %08lx%s\n",
+	       bl2_act_img.version, bl2_act_img.crc,
+	       fw_running_string(&bl2_act_img));
 	printf("  MAP \tVersion: %-8s\tCRC: %08lx\n",
-	       map_ver, (long)map.image_crc);
+	       map_ver, (long)map.img_crc);
 	printf("  IMG  \tVersion: %-8s\tCRC: %08lx%s\n",
 	       act_img.version, act_img.crc,
 	       fw_running_string(&act_img));
@@ -1198,6 +1207,9 @@ static int print_fw_part_info(struct switchtec_dev *dev)
 	}
 
 	printf("Inactive Partition:\n");
+	printf("  BL2  \tVersion: %-8s\tCRC: %08lx%s\n",
+	       bl2_inact_img.version, bl2_inact_img.crc,
+	       fw_running_string(&bl2_inact_img));
 	printf("  IMG  \tVersion: %-8s\tCRC: %08lx%s\n",
 	       inact_img.version, inact_img.crc,
 	       fw_running_string(&inact_img));
@@ -1237,7 +1249,6 @@ static int fw_info(int argc, char **argv)
 		switchtec_perror("print fw info");
 		return ret;
 	}
-
 
 	return 0;
 }
@@ -1367,7 +1378,7 @@ static int fw_toggle(int argc, char **argv)
 static int fw_read(int argc, char **argv)
 {
 	const char *desc = "Flash the firmware with a new image";
-	struct switchtec_fw_footer ftr;
+	struct switchtec_fw_meta ftr;
 	struct switchtec_fw_image_info act_img, inact_img, act_cfg, inact_cfg;
 	int ret = 0;
 	char version[16];
@@ -1424,8 +1435,8 @@ static int fw_read(int argc, char **argv)
 		type = SWITCHTEC_FW_TYPE_IMG0;
 	}
 
-	ret = switchtec_fw_read_footer(cfg.dev, img_addr, img_size, &ftr,
-				       version, sizeof(version));
+	ret = switchtec_fw_read_metadata(cfg.dev, img_addr, img_size, &ftr,
+					 version, sizeof(version));
 	if (ret < 0) {
 		switchtec_perror("fw_read_footer");
 		goto close_and_exit;
@@ -1433,8 +1444,8 @@ static int fw_read(int argc, char **argv)
 
 	fprintf(stderr, "Version:  %s\n", version);
 	fprintf(stderr, "Type:     %s\n", cfg.data ? "DAT" : "IMG");
-	fprintf(stderr, "Img Len:  0x%x\n", (int) ftr.image_len);
-	fprintf(stderr, "CRC:      0x%x\n", (int) ftr.image_crc);
+	fprintf(stderr, "Img Len:  0x%x\n", (int) ftr.img_length);
+	fprintf(stderr, "CRC:      0x%x\n", (int) ftr.img_crc);
 
 	ret = switchtec_fw_img_write_hdr(cfg.out_fd, &ftr, type);
 	if (ret < 0) {
@@ -1444,7 +1455,7 @@ static int fw_read(int argc, char **argv)
 
 	progress_start();
 	ret = switchtec_fw_read_fd(cfg.dev, cfg.out_fd, img_addr,
-				   ftr.image_len, progress_update);
+				   ftr.img_length, progress_update);
 	progress_finish();
 
 	if (ret < 0)
